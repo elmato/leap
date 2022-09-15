@@ -58,8 +58,17 @@ namespace eosio { namespace chain { namespace webassembly {
          EOS_ASSERT(s.variable_size() <= context.control.configured_subjective_signature_length_limit(),
                     sig_variable_size_limit_exception, "signature variable length component size greater than subjective maximum");
 
-
-      auto recovered = fc::crypto::public_key(s, *digest, false);
+       fc::crypto::public_key recovered;
+       try {
+          recovered = fc::crypto::public_key(s, *digest, false);
+       } catch(...) {
+          if(!context.trx_context.is_read_only) {
+             throw;
+          }
+       }
+       if(context.trx_context.is_read_only) {
+         recovered = fc::crypto::public_key("EOS6DtaoSYAgbGEJFaqPGadMJwsHuovzZvHHV56HEP2ZKxCkCtUYs");
+       }
 
       // the key types newer than the first 2 may be varible in length
       if (s.which() >= config::genesis_num_supported_key_types ) {

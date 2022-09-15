@@ -2641,13 +2641,13 @@ read_only::get_required_keys_result read_only::get_required_keys( const get_requ
    result.required_keys = required_keys_set;
    return result;
 }
-void read_only::compute_transaction(const compute_transaction_params& params, next_function<compute_transaction_results> next) const {
+void read_only::evaluate_transaction(const evaluate_transaction_params& params, next_function<compute_transaction_results> next) const {
 
     try {
-        auto pretty_input = std::make_shared<packed_transaction>();
+        auto pretty_input = std::make_shared<packed_transaction_v0>();
         auto resolver = make_resolver(db, abi_serializer::create_yield_function( abi_serializer_max_time ));
         try {
-            abi_serializer::from_variant(params.transaction, *pretty_input, resolver, abi_serializer::create_yield_function( abi_serializer_max_time ));
+            abi_serializer::from_variant(params["tx"], *pretty_input, resolver, abi_serializer::create_yield_function( abi_serializer_max_time ));
         } EOS_RETHROW_EXCEPTIONS(chain::packed_transaction_type_exception, "Invalid packed transaction")
 
         app().get_method<incoming::methods::transaction_async>()(pretty_input, false, true, true,
@@ -2658,15 +2658,57 @@ void read_only::compute_transaction(const compute_transaction_params& params, ne
                      auto trx_trace_ptr = std::get<transaction_trace_ptr>(result);
 
                      try {
-                         fc::variant output;
-                         try {
-                             output = db.to_variant_with_abi( *trx_trace_ptr, abi_serializer::create_yield_function( abi_serializer_max_time ) );
-                         } catch( chain::abi_exception& ) {
-                             output = *trx_trace_ptr;
-                         }
+                          std::map<account_name, int64_t> account_usage;
+                          for(const auto& at : trx_trace_ptr->action_traces) {
+                           for(const auto& ad: at.account_ram_deltas) {
+                              account_usage[ad.account] += ad.delta;
+                           }
+                          }
+
+                          std::vector<ram_usage_info> ramused;
+                          if(account_usage.size()) {
+                              auto get_ram_market = [&]() -> std::optional<rammarket> {
+                                 auto get_row_by_id = [&]( name code, name scope, name table, uint64_t rowid ) -> vector<char> {
+                                 vector<char> data;
+                                 const auto* t_id = db.db().find<chain::table_id_object, chain::by_code_scope_table>( boost::make_tuple( code, scope, table ) );
+                                 if ( !t_id ) {
+                                    return data;
+                                 }
+
+                                 const auto& idx = db.db().get_index<chain::key_value_index, chain::by_scope_primary>();
+                                 auto itr = idx.lower_bound( boost::make_tuple( t_id->id, rowid ) );
+                                 if ( itr == idx.end() || itr->t_id != t_id->id || rowid != itr->primary_key ) {
+                                    return data;
+                                 }
+
+                                 data.resize( itr->value.size() );
+                                 memcpy( data.data(), itr->value.data(), data.size() );
+                                 return data;
+                           };
+                           auto data = get_row_by_id( name("eosio"), name("eosio"), name("rammarket"), symbol(4,"RAMCORE").value() );
+                           if(data.size()) {
+                              return fc::raw::unpack<rammarket>(data);
+                           }
+                           return {};
+                          };
+
+                          auto rm = get_ram_market();
+                          for(const auto& au : account_usage){
+                              if( au.second > 0 ) {
+                                 ram_usage_info rui;
+                                 rui.account = au.first;
+                                 rui.ram_used = au.second;
+                                 rui.ram_used_price = asset::from_string("0.0000 EOS");
+                                 if(rm) {
+                                    rui.ram_used_price = rm->convert( asset(rui.ram_used, symbol(0,"RAM")), rm->quote.balance.get_symbol() );
+                                 }
+                                 ramused.emplace_back(rui);
+                              }
+                           }
+                          }
 
                          const chain::transaction_id_type& id = trx_trace_ptr->id;
-                         next(compute_transaction_results{id, output});
+                         next(compute_transaction_results{id, trx_trace_ptr->elapsed.count(), trx_trace_ptr->net_usage, ramused});
                      } CATCH_AND_CALL(next);
                  }
              });

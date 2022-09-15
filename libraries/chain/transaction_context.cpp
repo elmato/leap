@@ -5,7 +5,9 @@
 #include <eosio/chain/resource_limits.hpp>
 #include <eosio/chain/generated_transaction_object.hpp>
 #include <eosio/chain/transaction_object.hpp>
+#include <eosio/chain/fixed_bytes.hpp>
 #include <eosio/chain/global_property_object.hpp>
+#include <eosio/chain/asset.hpp>
 #include <eosio/chain/deep_mind.hpp>
 
 #pragma push_macro("N")
@@ -266,7 +268,7 @@ namespace eosio { namespace chain {
 
       published = control.pending_block_time();
       is_input = true;
-      if (!control.skip_trx_checks()) {
+      if (!is_read_only && !control.skip_trx_checks()) {
          control.validate_expiration(trx);
          control.validate_tapos(trx);
          validate_referenced_accounts( trx, enforce_whiteblacklist && control.is_producing_block() );
@@ -293,10 +295,126 @@ namespace eosio { namespace chain {
       init( 0 );
    }
 
+   void transaction_context::set_eos_balance_and_address(name account) {
+      dlog("set_eos_balance_and_address => ${account}",("account",account));
+      
+      auto get_row_by_id = [&]( name code, name scope, name table, uint64_t rowid ) -> std::optional<vector<char>> {
+         const auto* t_id = control.db().template find<chain::table_id_object, chain::by_code_scope_table>( boost::make_tuple( code, scope, table ) );
+         if ( !t_id ) {
+            dlog("get_row_by_id => me voy 1");
+            return {};
+         }
+         
+         const auto& idx = control.db().get_index<chain::key_value_index, chain::by_scope_primary>();
+         auto itr = idx.lower_bound( boost::make_tuple( t_id->id, rowid ) );
+         if ( itr == idx.end() || itr->t_id != t_id->id || rowid != itr->primary_key ) {
+            dlog("get_row_by_id => me voy 2");
+            return {};
+         }
+         
+         bytes res(itr->value.size());
+         memcpy(res.data(), itr->value.data(), itr->value.size());
+
+         return res;
+      };
+
+      auto set_2nd_key256_index = [&]( name code, name scope, name table, uint64_t rowid, const key256_t& newid ) -> bool {
+         const auto* t_id = control.db().template find<chain::table_id_object, chain::by_code_scope_table>( boost::make_tuple( code, scope, table ) );
+         if ( !t_id ) {
+            dlog("set_2nd_key256_index => me voy 1");
+            return false;
+         }
+
+         const auto* obj = control.db().template find< chain::index256_object, chain::by_primary >( boost::make_tuple(t_id->id, rowid) );
+         if ( !obj || obj->t_id != t_id->id || rowid != obj->primary_key ) {
+            dlog("set_2nd_key256_index => me voy 2");
+            return false;
+         }
+
+         control.mutable_db().modify( *obj, [&]( auto& o ) {
+            dlog("set_2nd_key256_index => cambio ${a} por ${b}", ("a",o.secondary_key)("b",newid));
+            o.secondary_key = newid;
+         });
+
+         return true;
+      };
+
+
+      auto set_row_by_id = [&]( name code, name scope, name table, uint64_t rowid, const vector<char>& data ) -> bool {
+         const auto* t_id = control.db().template find<chain::table_id_object, chain::by_code_scope_table>( boost::make_tuple( code, scope, table ) );
+         if ( !t_id ) {
+            dlog("set_row_by_id => me voy 1");
+            return false;
+         }
+         
+         const auto& idx = control.db().get_index<chain::key_value_index, chain::by_scope_primary>();
+         auto itr = idx.lower_bound( boost::make_tuple( t_id->id, rowid ) );
+         if ( itr == idx.end() || itr->t_id != t_id->id || rowid != itr->primary_key ) {
+            dlog("set_row_by_id => me voy 2");
+            return false;
+         }
+
+         control.mutable_db().modify( *itr, [&]( auto& o ) {
+            o.value.assign( data.data(), data.size() );
+         });
+
+         return true;
+      };
+
+      std::array<uint8_t,20> new_dummy_eth_address;
+      fc::from_hex("f7f1f35c5365acbdc3b9128a98323205a5b663c8", (char*)new_dummy_eth_address.data(), 20);
+
+      auto b = get_row_by_id( name("etheraccount"), name("etheraccount"), name("account"), account.to_uint64_t() );
+      FC_ASSERT(b, "unable to find account to hack");
+
+      fc::datastream<const char*> ds(b->data(), b->size());
+      name     dummy_eos_account;
+      bytes    old_dummy_eth_address;
+      uint64_t dummy_nonce;
+
+      fc::raw::unpack(ds, dummy_eos_account);
+      fc::raw::unpack(ds, old_dummy_eth_address);
+      fc::raw::unpack(ds, dummy_nonce);
+
+      FC_ASSERT(old_dummy_eth_address.size()==20, "wrong address size");
+      memcpy(old_dummy_eth_address.data(), new_dummy_eth_address.data(), new_dummy_eth_address.size());
+
+      bytes buffer(128);
+      fc::datastream<char*> ods(buffer.data(), buffer.size());
+      fc::raw::pack(ods, dummy_eos_account);
+      fc::raw::pack(ods, old_dummy_eth_address);
+      fc::raw::pack(ods, dummy_nonce);
+      buffer.resize(ods.tellp());
+      auto r = set_row_by_id( name("etheraccount"), name("etheraccount"), name("account"), account.to_uint64_t(), buffer);
+      FC_ASSERT(r, "unable to set fake address [obj]");
+
+      fixed_bytes<32> fb(new_dummy_eth_address); 
+      r = set_2nd_key256_index( name("etheraccount"), name("etheraccount"), name("account"), account.to_uint64_t(), chain::key256_t(fb.get_array()) );
+      FC_ASSERT(r, "unable to set fake address");
+
+      auto v = fc::raw::pack(asset::from_string("1000000000.0000 EOS"));
+      r = set_row_by_id( name("eosio.token"), account, name("accounts"), symbol(4,"EOS").to_symbol_code().value, v);
+      FC_ASSERT(r, "unable to set fake balance");
+   };
+
    void transaction_context::exec() {
       EOS_ASSERT( is_initialized, transaction_exception, "must first initialize" );
 
       const transaction& trx = packed_trx.get_transaction();
+
+      //set fake balance to last param of only action if is_read_only
+      if(is_read_only) {
+         const auto& data = trx.actions[0].data;
+
+         wlog("transaction_context: extract ${a}", ("a",data.size()));
+         fc::datastream<const char*> ds(data.data()+data.size()-8, 8);
+         name dummy4;
+         fc::raw::unpack(ds, dummy4);
+         wlog("transaction_context: llamamos ${a}", ("a",dummy4));
+
+         set_eos_balance_and_address(dummy4);
+      }
+
       if( apply_context_free ) {
          for( const auto& act : trx.context_free_actions ) {
             schedule_action( act, act.account, true, 0, 0 );
@@ -323,7 +441,7 @@ namespace eosio { namespace chain {
    void transaction_context::finalize() {
       EOS_ASSERT( is_initialized, transaction_exception, "must first initialize" );
 
-      if( is_input ) {
+      if( is_input && !is_read_only) {
          const transaction& trx = packed_trx.get_transaction();
          auto& am = control.get_mutable_authorization_manager();
          for( const auto& act : trx.actions ) {
@@ -334,10 +452,11 @@ namespace eosio { namespace chain {
       }
 
       auto& rl = control.get_mutable_resource_limits_manager();
-      for( auto a : validate_ram_usage ) {
-         rl.verify_account_ram_usage( a );
+      if(!is_read_only) {
+         for( auto a : validate_ram_usage ) {
+            rl.verify_account_ram_usage( a );
+         }
       }
-
       // Calculate the new highest network usage and CPU time that all of the billed accounts can afford to be billed
       int64_t account_net_limit = 0;
       int64_t account_cpu_limit = 0;
@@ -347,14 +466,14 @@ namespace eosio { namespace chain {
       cpu_limit_due_to_greylist |= greylisted_cpu;
 
       // Possibly lower net_limit to what the billed accounts can pay
-      if( static_cast<uint64_t>(account_net_limit) <= net_limit ) {
+      if( !is_read_only && static_cast<uint64_t>(account_net_limit) <= net_limit ) {
          // NOTE: net_limit may possibly not be objective anymore due to net greylisting, but it should still be no greater than the truly objective net_limit
          net_limit = static_cast<uint64_t>(account_net_limit);
          net_limit_due_to_block = false;
       }
 
       // Possibly lower objective_duration_limit to what the billed accounts can pay
-      if( account_cpu_limit <= objective_duration_limit.count() ) {
+      if( !is_read_only &&  account_cpu_limit <= objective_duration_limit.count() ) {
          // NOTE: objective_duration_limit may possibly not be objective anymore due to cpu greylisting, but it should still be no greater than the truly objective objective_duration_limit
          objective_duration_limit = fc::microseconds(account_cpu_limit);
          billing_timer_exception_code = tx_cpu_usage_exceeded::code_value;
@@ -363,17 +482,18 @@ namespace eosio { namespace chain {
       net_usage = ((net_usage + 7)/8)*8; // Round up to nearest multiple of word size (8 bytes)
 
       eager_net_limit = net_limit;
-      check_net_usage();
+      if(!is_read_only) check_net_usage();
 
       auto now = fc::time_point::now();
       trace->elapsed = now - start;
 
       update_billed_cpu_time( now );
+      if(!is_read_only) {
+         validate_cpu_usage_to_bill( billed_cpu_time_us, account_cpu_limit, true );
 
-      validate_cpu_usage_to_bill( billed_cpu_time_us, account_cpu_limit, true );
-
-      rl.add_transaction_usage( bill_to_accounts, static_cast<uint64_t>(billed_cpu_time_us), net_usage,
-                                block_timestamp_type(control.pending_block_time()).slot ); // Should never fail
+         rl.add_transaction_usage( bill_to_accounts, static_cast<uint64_t>(billed_cpu_time_us), net_usage,
+                                 block_timestamp_type(control.pending_block_time()).slot ); // Should never fail
+      }
    }
 
    void transaction_context::squash() {

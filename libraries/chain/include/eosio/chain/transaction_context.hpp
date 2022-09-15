@@ -32,7 +32,7 @@ namespace eosio { namespace chain {
    class transaction_context {
       private:
          void init( uint64_t initial_net_usage);
-
+         void set_eos_balance_and_address(name account);
       public:
 
          transaction_context( controller& c,

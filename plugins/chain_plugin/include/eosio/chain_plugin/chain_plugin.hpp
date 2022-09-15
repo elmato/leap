@@ -438,17 +438,84 @@ public:
       string        more; ///< fill lower_bound with this to fetch next set of transactions
    };
 
+
+   struct connector {
+      asset balance;
+      double weight = 0.5;
+   };
+
+   struct rammarket {
+      asset    supply;
+      connector base;
+      connector quote;
+
+      asset convert_to_exchange( connector& reserve, const asset& payment )
+      {
+         const double S0 = supply.get_amount();
+         const double R0 = reserve.balance.get_amount();
+         const double dR = payment.get_amount();
+         const double F  = reserve.weight;
+
+         double dS = S0 * ( std::pow(1. + dR / R0, F) - 1. );
+         if ( dS < 0 ) dS = 0; // rounding errors
+         reserve.balance += payment;
+         supply          += asset(dS, supply.get_symbol());
+         return asset( int64_t(dS), supply.get_symbol() );
+      }
+
+      asset convert_from_exchange( connector& reserve, const asset& tokens )
+      {
+         const double R0 = reserve.balance.get_amount();
+         const double S0 = supply.get_amount();
+         const double dS = -tokens.get_amount(); // dS < 0, tokens are subtracted from supply
+         const double Fi = double(1) / reserve.weight;
+
+         double dR = R0 * ( std::pow(1. + dS / S0, Fi) - 1. ); // dR < 0 since dS < 0
+         if ( dR > 0 ) dR = 0; // rounding errors
+         reserve.balance        -= asset(-dR, reserve.balance.get_symbol());
+         supply                 -= tokens;
+         return asset( int64_t(-dR), reserve.balance.get_symbol() );
+      }
+
+      asset convert( const asset& from, const symbol& to )
+      {
+         const auto& sell_symbol  = from.get_symbol();
+         const auto& base_symbol  = base.balance.get_symbol();
+         const auto& quote_symbol = quote.balance.get_symbol();
+         FC_ASSERT( sell_symbol != to, "cannot convert to the same symbol" );
+
+         asset out( 0, to );
+         if ( sell_symbol == base_symbol && to == quote_symbol ) {
+            const asset tmp = convert_to_exchange( base, from );
+            out = convert_from_exchange( quote, tmp );
+         } else if ( sell_symbol == quote_symbol && to == base_symbol ) {
+            const asset tmp = convert_to_exchange( quote, from );
+            out = convert_from_exchange( base, tmp );
+         } else {
+            FC_ASSERT( false, "invalid conversion" );
+         }
+         return out;
+      }
+
+   };
+
+   struct ram_usage_info {
+      name    account;
+      int64_t ram_used;
+      asset   ram_used_price;
+   };
+
    get_scheduled_transactions_result get_scheduled_transactions( const get_scheduled_transactions_params& params ) const;
    struct compute_transaction_results {
        chain::transaction_id_type  transaction_id;
-       fc::variant                 processed;
+       int64_t                     cpu_used;
+       uint64_t                    net_used;
+       std::vector<ram_usage_info> ram_used;
     };
+   
+   using evaluate_transaction_params = fc::variant_object;
 
-   struct compute_transaction_params {
-      fc::variant transaction;
-   };
-
-   void compute_transaction(const compute_transaction_params& params, chain::plugin_interface::next_function<compute_transaction_results> next ) const;
+   void evaluate_transaction(const evaluate_transaction_params& params, chain::plugin_interface::next_function<compute_transaction_results> next ) const;
 
    static void copy_inline_row(const chain::key_value_object& obj, vector<char>& data) {
       data.resize( obj.value.size() );
@@ -879,6 +946,10 @@ FC_REFLECT( eosio::chain_apis::read_only::abi_bin_to_json_params, (code)(action)
 FC_REFLECT( eosio::chain_apis::read_only::abi_bin_to_json_result, (args) )
 FC_REFLECT( eosio::chain_apis::read_only::get_required_keys_params, (transaction)(available_keys) )
 FC_REFLECT( eosio::chain_apis::read_only::get_required_keys_result, (required_keys) )
-FC_REFLECT( eosio::chain_apis::read_only::compute_transaction_params, (transaction))
-FC_REFLECT( eosio::chain_apis::read_only::compute_transaction_results, (transaction_id)(processed) )
+
+FC_REFLECT( eosio::chain_apis::read_only::connector, (balance)(weight) )
+FC_REFLECT( eosio::chain_apis::read_only::rammarket, (supply)(base)(quote) )
+FC_REFLECT( eosio::chain_apis::read_only::ram_usage_info, (account)(ram_used)(ram_used_price) )
+
+FC_REFLECT( eosio::chain_apis::read_only::compute_transaction_results, (transaction_id)(cpu_used)(net_used)(ram_used) )
 
