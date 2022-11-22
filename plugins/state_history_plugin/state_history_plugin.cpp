@@ -83,6 +83,7 @@ struct state_history_plugin_impl : std::enable_shared_from_this<state_history_pl
    string                           unix_path;
    state_history::trace_converter   trace_converter;
    std::set<std::shared_ptr<session_base>> session_set;
+   std::vector<name>                filter_on;
 
    using acceptor_type = std::variant<std::unique_ptr<tcp::acceptor>, std::unique_ptr<unixs::acceptor>>;
    std::set<acceptor_type>          acceptors;
@@ -496,9 +497,28 @@ struct state_history_plugin_impl : std::enable_shared_from_this<state_history_pl
    }
 
    // called from main thread
-   void on_applied_transaction(const transaction_trace_ptr& p, const packed_transaction_ptr& t) {
-      if (trace_log)
-         trace_converter.add_transaction(p, t);
+   void on_applied_transaction(const transaction_trace_ptr& p, const packed_transaction_ptr& pt) {
+      if (trace_log) {
+         const auto& t = pt->get_transaction();
+
+         auto it = std::find_first_of(t.actions.begin(), t.actions.end(), filter_on.begin(), filter_on.end(),
+            [&](const auto& act, const auto& n) {
+               return act.account == n || std::find_first_of(act.authorization.begin(), act.authorization.end(), filter_on.begin(), filter_on.end(),
+               [](const auto& pl, const auto& n){
+                  return pl.actor == n;
+               }) != act.authorization.end();
+         });
+
+         if( it == t.actions.end() ) {
+            auto ia = std::find_first_of(p->action_traces.begin(), p->action_traces.end(), filter_on.begin(), filter_on.end(),
+            [&](const auto& trace, const auto& n) {
+               return trace.receiver == n;
+            });
+            if (ia == p->action_traces.end()) return;
+         }
+
+         trace_converter.add_transaction(p, pt);
+      }
    }
 
    // called from main thread
@@ -617,6 +637,8 @@ void state_history_plugin::set_program_options(options_description& cli, options
 
    if(cfile::supports_hole_punching())
       options("state-history-log-retain-blocks", bpo::value<uint32_t>(), "if set, periodically prune the state history files to store only configured number of most recent blocks");
+   options("state-history-filter", bpo::value<vector<string>>()->composing(),
+          "by default no trace will be saved for any account, this filter will enable trace history only for the specified account (can be specified multiple times)");
 }
 
 void state_history_plugin::plugin_initialize(const variables_map& options) {
@@ -689,6 +711,14 @@ void state_history_plugin::plugin_initialize(const variables_map& options) {
       if (options.at("chain-state-history").as<bool>())
          my->chain_state_log.emplace("chain_state_history", (state_history_dir / "chain_state_history.log").string(),
                                      (state_history_dir / "chain_state_history.index").string(), ship_log_prune_conf);
+
+      if( options.count( "state-history-filter" )) {
+         auto fo = options.at( "state-history-filter" ).as<vector<string>>();
+         for(const auto& f : fo) {
+            my->filter_on.push_back(string_to_name(f));
+            ilog("save trace history for ${c}",("c",f));
+         }
+      }
    }
    FC_LOG_AND_RETHROW()
 } // state_history_plugin::plugin_initialize
