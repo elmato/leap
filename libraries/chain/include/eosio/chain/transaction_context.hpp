@@ -127,6 +127,11 @@ namespace eosio { namespace chain {
 
          fc::time_point                published;
 
+         std::vector<std::pair<std::string, int64_t>> timelogs;
+         void logtime(const std::string& tag) {
+            auto t = fc::time_point::now() - start;
+            timelogs.emplace_back(std::make_pair(tag, t.count()));
+         }
 
          deque<digest_type>           executed_action_receipt_digests;
          flat_set<account_name>        bill_to_accounts;
