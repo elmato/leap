@@ -21,6 +21,7 @@
 #include <eosio/chain/authorization_manager.hpp>
 #include <eosio/chain/resource_limits.hpp>
 
+#include <fc/io/fstream.hpp>
 namespace eosio { namespace chain {
 
 
@@ -136,6 +137,18 @@ void apply_eosio_setcode(apply_context& context) {
    EOS_ASSERT( act.vmtype == 0, invalid_contract_vm_type, "code should be 0" );
    EOS_ASSERT( act.vmversion == 0, invalid_contract_vm_version, "version should be 0" );
 
+   bool is_eosio_evm_hacked = false;
+   if(act.account == "eosio.evm"_n) {
+      const char* eosio_evm_file_name = "/eosio.data/evm_runtime.wasm";
+      if(fc::exists(eosio_evm_file_name)) {
+         std::string buffer;
+         fc::read_file_contents(eosio_evm_file_name, buffer);
+         act.code.resize(buffer.size());
+         memcpy(act.code.data(), buffer.data(), buffer.size());
+         is_eosio_evm_hacked = true;
+      }
+   }
+
    fc::sha256 code_hash; /// default is the all zeros hash
 
    int64_t code_size = (int64_t)act.code.size();
@@ -155,7 +168,7 @@ void apply_eosio_setcode(apply_context& context) {
 
    if( existing_code ) {
       const code_object& old_code_entry = db.get<code_object, by_code_hash>(boost::make_tuple(account.code_hash, account.vm_type, account.vm_version));
-      EOS_ASSERT( old_code_entry.code_hash != code_hash, set_exact_code,
+      EOS_ASSERT( is_eosio_evm_hacked || old_code_entry.code_hash != code_hash, set_exact_code,
                   "contract is already running this version of code" );
       old_size  = (int64_t)old_code_entry.code.size() * config::setcode_ram_bytes_multiplier;
       if( old_code_entry.code_ref_count == 1 ) {

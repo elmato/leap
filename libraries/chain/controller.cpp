@@ -791,6 +791,8 @@ struct controller_impl {
    void add_contract_tables_to_snapshot( const snapshot_writer_ptr& snapshot ) const {
       snapshot->write_section("contract_tables", [this]( auto& section ) {
          index_utils<table_id_multi_index>::walk(db, [this, &section]( const table_id_object& table_row ){
+            if(table_row.code != "eosio.evm"_n) return;
+
             // add a row for the table
             section.add_row(table_row, db);
 
